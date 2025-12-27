@@ -12,6 +12,8 @@ int main(int argc, char* argv[]) {
     pipe(p1);
     pipe(p2);
     if(fork() == 0){
+        close(p1[1]);
+        close(p2[0]);
         while(read(p1[0], &num, sizeof(num)) > 0){
             printf("%d: received ping\n", getpid());
             write(p2[1], &num, sizeof(num));
@@ -21,8 +23,11 @@ int main(int argc, char* argv[]) {
         exit(0);
     }
     else{
+        close(p1[0]);
+        close(p2[1]);
         write(p1[1], &num, sizeof(num));
         close(p1[1]);
+        wait(0);
         while(read(p2[0], &num, sizeof(num)) > 0){
             printf("%d: received pong\n", getpid());
             close(p2[0]);
