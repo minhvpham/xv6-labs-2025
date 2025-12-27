@@ -296,6 +296,9 @@ fork(void)
   }
   np->sz = p->sz;
 
+  // Copy trace mask from parent to child process
+  np->trace_mask = p->trace_mask;
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -692,4 +695,42 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+uint64
+count_active_proc()
+{
+  int count = 0;
+  struct proc* p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+
+    if (p->state != UNUSED) count++;
+
+    release(&p->lock);
+  }
+
+  return count;
+}
+
+uint64 global_loadavg = 0;
+
+void
+update_loadavg()
+{
+  uint64 active_proc = 0;
+  struct proc* p;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+
+    if (p->state == RUNNING || p->state == RUNNABLE)
+      active_proc++;
+
+    release(&p->lock);
+  }
+
+  active_proc <<= 16;
+  global_loadavg = (global_loadavg * 98 + active_proc * 2) / 100;
+  // printf("Update: %lld\n", (long long)global_loadavg);
 }

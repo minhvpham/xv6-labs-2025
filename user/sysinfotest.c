@@ -3,15 +3,55 @@
 #include "kernel/sysinfo.h"
 #include "user/user.h"
 
+// user/sysinfotest.c
 
+void
+testloadavg(void) {
+  struct sysinfo info;
+  int n_stress = 2;
+  int pids[2];
+
+  printf("\n--- Starting Load Average Test ---\n");
+
+  // 1. Create artificial load
+  for(int i = 0; i < n_stress; i++){
+    int pid = fork();
+    if(pid == 0){
+      // Child spins forever to ensure state is RUNNING
+      while(1);
+    }
+    pids[i] = pid;
+  }
+
+  // 2. Wait long enough for the kernel to trigger updates (ticks % 100)
+  // We sleep 300 ticks to get ~3 updates
+  sleep(300);
+
+  // 3. Measure
+  if (sysinfo(&info) < 0) {
+    printf("FAIL: sysinfo failed\n");
+    exit(1);
+  }
+
+  // 4. Print
+  int whole = (int)(info.loadavg >> 16);
+  int frac  = (int)(((info.loadavg & 0xFFFF) * 100) / 65536);
+  printf("Load Average: %d.%d\n", whole, frac);
+
+  // 5. Cleanup
+  for(int i = 0; i < n_stress; i++){
+    kill(pids[i]);
+    wait(0);
+  }
+  printf("--- End Load Average Test ---\n\n");
+}
 void
 sinfo(struct sysinfo *info) {
   if (sysinfo(info) < 0) {
-    printf("FAIL: sysinfo failed");
+    printf("FAIL: sysinfo failed\n");
     exit(1);
   }
 }
-
 //
 // use sbrk() to count how many free physical memory pages there are.
 //
@@ -148,6 +188,7 @@ main(int argc, char *argv[])
   testcall();
   testmem();
   testproc();
+  testloadavg();
   printf("sysinfotest: OK\n");
   exit(0);
 }

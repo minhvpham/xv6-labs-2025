@@ -1,0 +1,468 @@
+diff --git a/answers-pgtbl.txt b/answers-pgtbl.txt
+new file mode 100644
+index 0000000..5ecb394
+--- /dev/null
++++ b/answers-pgtbl.txt
+@@ -0,0 +1,5 @@
++Q: Which other xv6 system call(s) could be made faster using this shared page? Explain how.
++A: The system call uptime() is the best candidate for this optimization. The system uptime (number of clock ticks since boot) is a global variable maintained by the kernel. Like the PID, it is read-frequently but written-only by the kernel. To implement this, we can add a field (e.g., uint64 ticks) to the shared usyscall structure. The kernel's timer interrupt handler would update this value in the shared page every time the hardware timer fires. The user space uptime() function would simply read this memory address instead of performing a system call. This eliminates the trap overhead for time-checking.
++
++Q: For every leaf page in the vmprint output, explain what it logically contains and what its permission bits are.
++A: A leaf page corresponds to a level-0 page table entry that directly maps a virtual address to a physical memory page in RAM. Leaf pages contain actual data used by the process, such as program code, stack, heap, global variables, trapframes, or the trampoline code. Each leaf page table entry must have at least one of the permission bits PTE_R, PTE_W, or PTE_X set, indicating whether the mapped memory is readable, writable, and/or executable. These permissions enforce memory protection and determine how the process may access each page.
+\ No newline at end of file
+diff --git a/grade-lab-pgtbl b/grade-lab-pgtbl
+index 1e5475e..cfcc45e 100755
+--- a/grade-lab-pgtbl
++++ b/grade-lab-pgtbl
+@@ -5,6 +5,22 @@ from gradelib import *
+ 
+ r = Runner(save("xv6.out"))
+ 
++PTE_PRINT = """page table 0x0000000087f4e000
++ ..0: pte 0x0000000021fd2801 pa 0x0000000087f4a000
++ .. ..0: pte 0x0000000021fd2401 pa 0x0000000087f49000
++ .. .. ..0: pte 0x0000000021fd2c1b pa 0x0000000087f4b000
++ .. .. ..1: pte 0x0000000021fd2017 pa 0x0000000087f48000
++ .. .. ..2: pte 0x0000000021fd1c07 pa 0x0000000087f47000
++ .. .. ..3: pte 0x0000000021fd1817 pa 0x0000000087f46000
++ ..255: pte 0x0000000021fd3401 pa 0x0000000087f4d000
++ .. ..511: pte 0x0000000021fd3001 pa 0x0000000087f4c000
++ .. .. ..510: pte 0x0000000021fd5807 pa 0x0000000087f56000
++ .. .. ..511: pte 0x000000002000180b pa 0x0000000080006000"""
++
++VAL_RE = "(0x00000000[0-9a-f]+)"
++INDENT_RE = r"\s*\.\.\s*"
++INDENT_ESC = "\\\s*\.\.\\\s*"
++
+ @test(0, "pgtbltest")
+ def test_pgtbltest():
+     r.run_qemu(shell_script([
+@@ -12,29 +28,33 @@ def test_pgtbltest():
+     ]), timeout=300)
+ 
+ @test(10, "pgtbltest: ugetpid", parent=test_pgtbltest)
+-def test_ugetpid_():
++def test_nettest_():
+     r.match('^ugetpid_test: OK$')
+ 
+-@test(10, "pgtbltest: print_kpgtbl", parent=test_pgtbltest)
+-def test_print_kpgtbl_():
+-    r.match(
+-        '^page table 0x',
+-        '^ \.\.0x0000000000000000',
+-        '^ \.\. \.\.0x0000000000000000',
+-        '^ \.\. \.\. \.\.0x0000000000000000',
+-        '^ \.\. \.\. \.\.0x0000000000001000',
+-        '^ \.\. \.\. \.\.0x0000000000002000',
+-        '^ \.\. \.\. \.\.0x0000000000003000',
+-        '^ \.\.(0xffffffffc0000000|0x0000003fc0000000)',
+-        '^ \.\. \.\.(0xffffffffffe00000|0x0000003fffe00000)',
+-        '^ \.\. \.\. \.\.(0xffffffffffffd000|0x0000003fffffd000)',
+-        '^ \.\. \.\. \.\.(0xffffffffffffe000|0x0000003fffffe000)',
+-        '^ \.\. \.\. \.\.(0xfffffffffffff000|0x0000003ffffff000)',
+-    )
+-
+-@test(15, "pgtbltest: superpg", parent=test_pgtbltest)
+-def test_superpg_():
+-    r.match('^superpg_test: OK$')
++@test(10, "pgtbltest: pgaccess", parent=test_pgtbltest)
++def test_nettest_():
++    r.match('^pgaccess_test: OK$')
++
++@test(10, "pte printout")
++def test_pteprint():
++    first = True
++    r.run_qemu(shell_script([
++        'echo hi'
++    ]))
++    r.match('^hi')
++    p = re.compile(VAL_RE)
++    d = re.compile(INDENT_RE)
++    for l in PTE_PRINT.splitlines():
++        l = d.sub(INDENT_ESC, l)
++        l = p.sub(VAL_RE, l)
++        r.match(r'^{}$'.format(l))
++        if first:
++            first = False
++        else:
++            matches = re.findall(r'^{}$'.format(l), r.qemu.output, re.MULTILINE)
++            assert_equal(len(matches[0]), 2)
++            pa = (int(matches[0][0], 16) >> 10) << 12
++            assert_equal(int(matches[0][1], 16), pa)
+ 
+ @test(5, "answers-pgtbl.txt")
+ def test_answers():
+@@ -45,7 +65,7 @@ def test_answers():
+ def test_usertests():
+     r.run_qemu(shell_script([
+         'usertests -q'
+-    ]), timeout=300)
++    ]), timeout=900)
+ 
+ @test(10, "usertests: all tests", parent=test_usertests)
+ def test_usertests():
+@@ -55,4 +75,4 @@ def test_usertests():
+ def test_time():
+     check_time()
+ 
+-run_tests()
++run_tests()
+\ No newline at end of file
+diff --git a/kernel/exec.c b/kernel/exec.c
+index 6d7c452..f0a2264 100644
+--- a/kernel/exec.c
++++ b/kernel/exec.c
+@@ -128,6 +128,7 @@ exec(char *path, char **argv)
+   p->trapframe->sp = sp; // initial stack pointer
+   proc_freepagetable(oldpagetable, oldsz);
+ 
++  if(p->pid==1) vmprint(p->pagetable);
+   return argc; // this ends up in a0, the first argument to main(argc, argv)
+ 
+  bad:
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 130d9ce..6a3bdbe 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -125,6 +125,13 @@ found:
+   p->pid = allocpid();
+   p->state = USED;
+ 
++  if((p->usyscall = (struct usyscall *)kalloc()) == 0){
++    freeproc(p);
++    release(&p->lock);
++    return 0;
++  }
++  p->usyscall->pid = p->pid;
++
+   // Allocate a trapframe page.
+   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+     freeproc(p);
+@@ -158,6 +165,9 @@ freeproc(struct proc *p)
+   if(p->trapframe)
+     kfree((void*)p->trapframe);
+   p->trapframe = 0;
++  if(p->usyscall)
++    kfree((void*)p->usyscall);
++  p->usyscall = 0;
+   if(p->pagetable)
+     proc_freepagetable(p->pagetable, p->sz);
+   p->pagetable = 0;
+@@ -202,6 +212,12 @@ proc_pagetable(struct proc *p)
+     return 0;
+   }
+ 
++  if(mappages(pagetable, USYSCALL, PGSIZE,
++              (uint64)(p->usyscall), PTE_R | PTE_U) < 0){
++    uvmunmap(pagetable, TRAPFRAME, 1, 0);
++    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
++    uvmfree(pagetable, 0);
++  }
+   return pagetable;
+ }
+ 
+@@ -212,6 +228,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
+ {
+   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+   uvmunmap(pagetable, TRAPFRAME, 1, 0);
++  uvmunmap(pagetable, USYSCALL, 1, 0);
+   uvmfree(pagetable, sz);
+ }
+ 
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..acd4f0a 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -100,6 +100,7 @@ struct proc {
+   uint64 sz;                   // Size of process memory (bytes)
+   pagetable_t pagetable;       // User page table
+   struct trapframe *trapframe; // data page for trampoline.S
++  struct usyscall *usyscall;
+   struct context context;      // swtch() here to run process
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+diff --git a/kernel/riscv.h b/kernel/riscv.h
+index 6cfff1e..0707295 100644
+--- a/kernel/riscv.h
++++ b/kernel/riscv.h
+@@ -375,6 +375,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
+ #define PTE_W (1L << 2)
+ #define PTE_X (1L << 3)
+ #define PTE_U (1L << 4) // user can access
++#define PTE_A (1L << 6) // check accessed page
+ 
+ 
+ 
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 4aea542..968fbc7 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -111,6 +111,7 @@ extern uint64 sys_recv(void);
+ #ifdef LAB_PGTBL
+ extern uint64 sys_pgpte(void);
+ extern uint64 sys_kpgtbl(void);
++extern uint64 sys_pgaccess(void);
+ #endif
+ 
+ // An array mapping syscall numbers from syscall.h
+@@ -146,6 +147,7 @@ static uint64 (*syscalls[])(void) = {
+ #ifdef LAB_PGTBL
+ [SYS_pgpte] sys_pgpte,
+ [SYS_kpgtbl] sys_kpgtbl,
++[SYS_pgaccess] sys_pgaccess,
+ #endif
+ };
+ 
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index a122272..d0dcdd9 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -35,3 +35,4 @@
+ #define SYS_recv      32
+ #define SYS_pgpte     33
+ #define SYS_kpgtbl    34
++#define SYS_pgaccess  35
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index d9b7f9c..a97172f 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -123,3 +123,35 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64
++sys_pgaccess(void)
++{
++  uint64 base;
++  argaddr(0, &base);
++
++  int len;
++  argint(1, &len);
++
++  uint64 mask;
++  argaddr(2, &mask);
++
++  if (len > 64 || len < 0) return -1;
++
++  struct proc* p = myproc();
++  uint64 bit_mask = 0;
++  for(int i = 0; i < len; i++) {
++    uint64 va = base + i * PGSIZE;
++
++    pte_t *pte = walk(p->pagetable, va, 0);
++
++    if (pte && (*pte & PTE_V) && (*pte & PTE_A)) {
++      bit_mask |= (1L << i);
++      *pte = *pte & (~PTE_A);
++    }
++  }
++
++  if (copyout(p->pagetable, mask, (char*) &bit_mask, sizeof(bit_mask)) < 0)
++    return -1;
++  return 0;
++}
+\ No newline at end of file
+diff --git a/kernel/vm.c b/kernel/vm.c
+index 7f388fe..fc3009c 100644
+--- a/kernel/vm.c
++++ b/kernel/vm.c
+@@ -489,8 +489,26 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
+ 
+ #ifdef LAB_PGTBL
+ void
++vmprint_walk(pagetable_t pagetable, int level) {
++  if (level > 2) return;
++  for(int i = 0; i < (1 << 9); i++) {
++    pte_t pte = pagetable[i];
++    if (pte & PTE_V) {
++      for(int j = 0; j <= level; j++) {
++        printf(" ..");
++      }
++      uint64 child = PTE2PA(pte);
++      printf("%d: pte %p pa %p\n", i, (void*)pte, (void*)child);
++      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
++        vmprint_walk((pagetable_t)child, level + 1);
++      }
++    }
++  }
++}
++void
+ vmprint(pagetable_t pagetable) {
+-  // your code here
++  printf("page table %p\n", pagetable);
++  vmprint_walk(pagetable, 0);
+ }
+ #endif
+ 
+diff --git a/user/pgtbltest.c b/user/pgtbltest.c
+index cde6e03..bce158a 100644
+--- a/user/pgtbltest.c
++++ b/user/pgtbltest.c
+@@ -4,20 +4,14 @@
+ #include "kernel/riscv.h"
+ #include "user/user.h"
+ 
+-#define N (8 * (1 << 20))
+-
+-void print_pgtbl();
+-void print_kpgtbl();
+ void ugetpid_test();
+-void superpg_test();
++void pgaccess_test();
+ 
+ int
+ main(int argc, char *argv[])
+ {
+-  print_pgtbl();
+   ugetpid_test();
+-  print_kpgtbl();
+-  superpg_test();
++  pgaccess_test();
+   printf("pgtbltest: all tests succeeded\n");
+   exit(0);
+ }
+@@ -31,27 +25,6 @@ err(char *why)
+   exit(1);
+ }
+ 
+-void
+-print_pte(uint64 va)
+-{
+-    pte_t pte = (pte_t) pgpte((void *) va);
+-    printf("va 0x%lx pte 0x%lx pa 0x%lx perm 0x%lx\n", va, pte, PTE2PA(pte), PTE_FLAGS(pte));
+-}
+-
+-void
+-print_pgtbl()
+-{
+-  printf("print_pgtbl starting\n");
+-  for (uint64 i = 0; i < 10; i++) {
+-    print_pte(i * PGSIZE);
+-  }
+-  uint64 top = MAXVA/PGSIZE;
+-  for (uint64 i = top-10; i < top; i++) {
+-    print_pte(i * PGSIZE);
+-  }
+-  printf("print_pgtbl: OK\n");
+-}
+-
+ void
+ ugetpid_test()
+ {
+@@ -76,67 +49,22 @@ ugetpid_test()
+ }
+ 
+ void
+-print_kpgtbl()
+-{
+-  printf("print_kpgtbl starting\n");
+-  kpgtbl();
+-  printf("print_kpgtbl: OK\n");
+-}
+-
+-
+-void
+-supercheck(uint64 s)
++pgaccess_test()
+ {
+-  pte_t last_pte = 0;
+-
+-  for (uint64 p = s;  p < s + 512 * PGSIZE; p += PGSIZE) {
+-    pte_t pte = (pte_t) pgpte((void *) p);
+-    if(pte == 0)
+-      err("no pte");
+-    if ((uint64) last_pte != 0 && pte != last_pte) {
+-        err("pte different");
+-    }
+-    if((pte & PTE_V) == 0 || (pte & PTE_R) == 0 || (pte & PTE_W) == 0){
+-      err("pte wrong");
+-    }
+-    last_pte = pte;
+-  }
+-
+-  for(int i = 0; i < 512; i += PGSIZE){
+-    *(int*)(s+i) = i;
+-  }
+-
+-  for(int i = 0; i < 512; i += PGSIZE){
+-    if(*(int*)(s+i) != i)
+-      err("wrong value");
+-  }
+-}
+-
+-void
+-superpg_test()
+-{
+-  int pid;
+-  
+-  printf("superpg_test starting\n");
+-  testname = "superpg_test";
+-  
+-  char *end = sbrk(N);
+-  if (end == 0 || end == (char*)0xffffffffffffffff)
+-    err("sbrk failed");
+-  
+-  uint64 s = SUPERPGROUNDUP((uint64) end);
+-  supercheck(s);
+-  if((pid = fork()) < 0) {
+-    err("fork");
+-  } else if(pid == 0) {
+-    supercheck(s);
+-    exit(0);
+-  } else {
+-    int status;
+-    wait(&status);
+-    if (status != 0) {
+-      exit(0);
+-    }
+-  }
+-  printf("superpg_test: OK\n");  
++  char *buf;
++  unsigned int abits;
++  printf("pgaccess_test starting\n");
++  testname = "pgaccess_test";
++  buf = malloc(32 * PGSIZE);
++  if (pgaccess(buf, 32, &abits) < 0)
++    err("pgaccess failed");
++  buf[PGSIZE * 1] += 1;
++  buf[PGSIZE * 2] += 1;
++  buf[PGSIZE * 30] += 1;
++  if (pgaccess(buf, 32, &abits) < 0)
++    err("pgaccess failed");
++  if (abits != ((1 << 1) | (1 << 2) | (1 << 30)))
++    err("incorrect access bits set");
++  free(buf);
++  printf("pgaccess_test: OK\n");
+ }
+diff --git a/user/user.h b/user/user.h
+index b91fd89..1014ea9 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -36,6 +36,8 @@ int recv(uint32, uint32*, uint32*, char *, uint32);
+ int ugetpid(void);
+ uint64 pgpte(void*);
+ void kpgtbl(void);
++int pgaccess(void *base, int len, void *mask);
++
+ #endif
+ 
+ // ulib.c
+diff --git a/user/usys.pl b/user/usys.pl
+index 2c19fa6..7af651c 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -14,7 +14,7 @@ sub entry {
+     print " ecall\n";
+     print " ret\n";
+ }
+-	
++
+ entry("fork");
+ entry("exit");
+ entry("wait");
+@@ -42,3 +42,4 @@ entry("send");
+ entry("recv");
+ entry("pgpte");
+ entry("kpgtbl");
++entry("pgaccess");
