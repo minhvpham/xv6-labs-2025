@@ -123,3 +123,35 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_pgaccess(void)
+{
+  uint64 base;
+  argaddr(0, &base);
+
+  int len;
+  argint(1, &len);
+
+  uint64 mask;
+  argaddr(2, &mask);
+
+  if (len > 64 || len < 0) return -1;
+
+  struct proc* p = myproc();
+  uint64 bit_mask = 0;
+  for(int i = 0; i < len; i++) {
+    uint64 va = base + i * PGSIZE;
+
+    pte_t *pte = walk(p->pagetable, va, 0);
+
+    if (pte && (*pte & PTE_V) && (*pte & PTE_A)) {
+      bit_mask |= (1L << i);
+      *pte = *pte & (~PTE_A);
+    }
+  }
+
+  if (copyout(p->pagetable, mask, (char*) &bit_mask, sizeof(bit_mask)) < 0)
+    return -1;
+  return 0;
+}
